@@ -1,1 +1,199 @@
+"""
+==============================================================
+ E-COMMERCE SALES & CUSTOMER ANALYTICS
+ File : src/02_eda.py
+ Desc : Deep exploratory analysis across sales, customers,
+        products and time dimensions.
+==============================================================
+"""
 
+import pandas as pd
+import numpy as np
+import os
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+def load():
+    c = pd.read_csv(os.path.join(DATA_DIR, "customers_clean.csv"), parse_dates=["join_date"])
+    p = pd.read_csv(os.path.join(DATA_DIR, "products_clean.csv"))
+    o = pd.read_csv(os.path.join(DATA_DIR, "orders_clean.csv"),    parse_dates=["order_date"])
+    return c, p, o
+
+def merge_all(c, p, o):
+    df = (o
+          .merge(c[["customer_id","age","gender","city","state","segment","is_subscribed","age_group"]], on="customer_id", how="left")
+          .merge(p[["product_id","product_name","category","margin_pct","price_tier"]], on="product_id", how="left"))
+    return df
+
+def section(title):
+    print(f"\n{'='*60}\n  {title}\n{'='*60}")
+
+
+def eda_sales(df):
+    section("SALES OVERVIEW")
+
+    delivered = df[df["order_status"] == "Delivered"]
+
+    total_rev    = df["revenue"].sum()
+    total_profit = df["profit"].sum()
+    total_orders = len(df)
+    avg_order    = df["revenue"].mean()
+
+    print(f"  Total Revenue    : ₹{total_rev:>12,.0f}")
+    print(f"  Total Profit     : ₹{total_profit:>12,.0f}")
+    print(f"  Total Orders     :  {total_orders:>12,}")
+    print(f"  Avg Order Value  : ₹{avg_order:>12,.0f}")
+    print(f"  Overall Margin % :  {(total_profit/total_rev*100):>11.1f}%")
+
+    section("ORDER STATUS DISTRIBUTION")
+    status = df["order_status"].value_counts()
+    for s, n in status.items():
+        print(f"  {s:<15}: {n:>5}  ({n/len(df)*100:.1f}%)")
+
+    section("REVENUE BY YEAR")
+    yr = df.groupby("year")["revenue"].sum()
+    for y, r in yr.items():
+        print(f"  {y}: ₹{r:,.0f}")
+
+    section("REVENUE BY QUARTER")
+    q = df.groupby(["year","quarter"])["revenue"].sum().reset_index()
+    print(q.to_string(index=False))
+
+    section("TOP 5 MONTHS BY REVENUE")
+    mon = (df.groupby(["year","month_name","month"])["revenue"]
+             .sum().reset_index()
+             .sort_values("revenue", ascending=False).head(5))
+    for _, row in mon.iterrows():
+        print(f"  {row['month_name']} {int(row['year'])}: ₹{row['revenue']:,.0f}")
+
+    section("PAYMENT METHOD BREAKDOWN")
+    pm = df.groupby("payment_method")["revenue"].agg(["sum","count"])
+    pm["avg"] = pm["sum"]/pm["count"]
+    pm = pm.sort_values("sum", ascending=False)
+    print(pm.round(0).to_string())
+
+    return total_rev, total_profit
+
+
+def eda_customers(df, customers):
+    section("CUSTOMER SEGMENT ANALYSIS")
+    seg = df.groupby("segment").agg(
+        orders=("order_id","count"),
+        revenue=("revenue","sum"),
+        avg_order=("revenue","mean"),
+        avg_rating=("rating","mean")
+    ).round(1)
+    print(seg.to_string())
+
+    section("TOP 10 CITIES BY REVENUE")
+    city = df.groupby("city")["revenue"].sum().nlargest(10)
+    for c, r in city.items():
+        print(f"  {c:<20}: ₹{r:,.0f}")
+
+    section("GENDER SPLIT")
+    gen = df.groupby("gender").agg(orders=("order_id","count"), revenue=("revenue","sum"))
+    print(gen.to_string())
+
+    section("AGE GROUP ANALYSIS")
+    ag = df.groupby("age_group", observed=True).agg(
+        customers=("customer_id","nunique"),
+        orders=("order_id","count"),
+        avg_revenue=("revenue","mean")
+    ).round(1)
+    print(ag.to_string())
+
+    section("SUBSCRIBER VS NON-SUBSCRIBER")
+    sub = df.groupby("is_subscribed").agg(
+        orders=("order_id","count"),
+        revenue=("revenue","sum"),
+        avg_order=("revenue","mean")
+    ).round(0)
+    sub.index = sub.index.map({0:"Non-Subscriber", 1:"Subscriber"})
+    print(sub.to_string())
+
+
+def eda_products(df):
+    section("REVENUE BY CATEGORY")
+    cat = df.groupby("category").agg(
+        orders=("order_id","count"),
+        revenue=("revenue","sum"),
+        profit=("profit","sum"),
+        avg_rating=("rating","mean")
+    ).sort_values("revenue", ascending=False)
+    cat["margin%"] = (cat["profit"]/cat["revenue"]*100).round(1)
+    print(cat.round(1).to_string())
+
+    section("TOP 10 PRODUCTS BY REVENUE")
+    prod = df.groupby("product_name")["revenue"].sum().nlargest(10)
+    for p, r in prod.items():
+        print(f"  {p:<25}: ₹{r:,.0f}")
+
+    section("DISCOUNT IMPACT ON PROFIT")
+    disc = df.groupby("discount_band", observed=True).agg(
+        orders=("order_id","count"),
+        avg_revenue=("revenue","mean"),
+        avg_profit=("profit","mean"),
+        loss_orders=("is_loss","sum")
+    ).round(1)
+    print(disc.to_string())
+
+    section("PRICE TIER PERFORMANCE")
+    pt = df.groupby("price_tier", observed=True).agg(
+        orders=("order_id","count"),
+        revenue=("revenue","sum"),
+        avg_order=("revenue","mean")
+    ).round(0)
+    print(pt.to_string())
+
+
+def eda_rfm(df):
+    section("RFM ANALYSIS — TOP 15 CUSTOMERS")
+    snapshot = pd.Timestamp("2025-01-01")
+    delivered = df[df["order_status"] == "Delivered"]
+
+    rfm = delivered.groupby("customer_id").agg(
+        recency =("order_date", lambda x: (snapshot - x.max()).days),
+        frequency=("order_id","count"),
+        monetary =("revenue","sum")
+    ).reset_index()
+
+    # Score each dimension 1-4
+    rfm["R"] = pd.qcut(rfm["recency"],   q=4, labels=[4,3,2,1]).astype(int)
+    rfm["F"] = pd.qcut(rfm["frequency"].rank(method="first"), q=4, labels=[1,2,3,4]).astype(int)
+    rfm["M"] = pd.qcut(rfm["monetary"],  q=4, labels=[1,2,3,4]).astype(int)
+    rfm["rfm_score"] = rfm["R"] + rfm["F"] + rfm["M"]
+
+    def segment(score):
+        if score >= 10: return "Champions"
+        elif score >= 8: return "Loyal"
+        elif score >= 6: return "At Risk"
+        else:            return "Lost"
+
+    rfm["rfm_segment"] = rfm["rfm_score"].apply(segment)
+
+    print("\n  RFM Segment Distribution:")
+    print(rfm["rfm_segment"].value_counts().to_string())
+
+    print("\n  Top 15 Customers by Monetary Value:")
+    top = rfm.nlargest(15, "monetary")[["customer_id","recency","frequency","monetary","rfm_segment"]]
+    print(top.to_string(index=False))
+
+    return rfm
+
+
+def main():
+    c, p, o = load()
+    df = merge_all(c, p, o)
+
+    eda_sales(df)
+    eda_customers(df, c)
+    eda_products(df)
+    rfm = eda_rfm(df)
+
+    rfm.to_csv(os.path.join(DATA_DIR, "rfm.csv"), index=False)
+    print("\n✅ RFM table saved → data/rfm.csv")
+    print("✅ EDA complete.")
+
+
+if __name__ == "__main__":
+    main()
