@@ -1,12 +1,4 @@
 
-"""
-==============================================================
- E-COMMERCE SALES & CUSTOMER ANALYTICS
- File : src/03_visualizations.py
- Desc : Generate & save all 14 publication-quality charts.
-==============================================================
-"""
-
 import pandas as pd
 import numpy as np
 import matplotlib
