@@ -1,1 +1,389 @@
 
+"""
+==============================================================
+ E-COMMERCE SALES & CUSTOMER ANALYTICS
+ File : src/03_visualizations.py
+ Desc : Generate & save all 14 publication-quality charts.
+==============================================================
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+import os, warnings
+warnings.filterwarnings("ignore")
+
+sns.set_theme(style="whitegrid", palette="deep")
+plt.rcParams.update({"font.family": "DejaVu Sans", "axes.titlepad": 14})
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+FIG_DIR  = os.path.join(os.path.dirname(__file__), "..", "visualizations")
+os.makedirs(FIG_DIR, exist_ok=True)
+
+CAT_COLORS = {
+    "Electronics":"#2196F3","Clothing":"#E91E63","Home & Kitchen":"#FF9800",
+    "Books":"#4CAF50","Sports":"#9C27B0","Beauty":"#F44336",
+    "Toys":"#00BCD4","Grocery":"#FF5722",
+}
+
+def load():
+    c = pd.read_csv(os.path.join(DATA_DIR, "customers_clean.csv"), parse_dates=["join_date"])
+    p = pd.read_csv(os.path.join(DATA_DIR, "products_clean.csv"))
+    o = pd.read_csv(os.path.join(DATA_DIR, "orders_clean.csv"),    parse_dates=["order_date"])
+    rfm = pd.read_csv(os.path.join(DATA_DIR, "rfm.csv"))
+    df = (o.merge(c[["customer_id","age","gender","city","state","segment","is_subscribed","age_group"]], on="customer_id", how="left")
+           .merge(p[["product_id","product_name","category","margin_pct","price_tier"]], on="product_id", how="left"))
+    return c, p, o, df, rfm
+
+def save(fig, name):
+    path = os.path.join(FIG_DIR, name)
+    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved -> {name}")
+
+fmt_inr = lambda x, _: f"₹{x/1e6:.1f}M"
+
+
+# ── 01  Monthly Revenue Trend ─────────────────────────────────────────────────
+def chart_monthly_revenue(o):
+    monthly = o.groupby(o["order_date"].dt.to_period("M"))["revenue"].sum().reset_index()
+    monthly["order_date"] = monthly["order_date"].dt.to_timestamp()
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    ax.fill_between(monthly["order_date"], monthly["revenue"], alpha=0.18, color="#1565C0")
+    ax.plot(monthly["order_date"], monthly["revenue"], color="#1565C0", linewidth=2.2)
+
+    # Annotate Q4 peaks
+    q4 = monthly[monthly["order_date"].dt.month.isin([10,11,12])]
+    ax.scatter(q4["order_date"], q4["revenue"], color="#E53935", s=40, zorder=5, label="Q4 (Festival Season)")
+
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_inr))
+    ax.set_title("Monthly Revenue Trend (2022-2024)", fontsize=15, fontweight="bold")
+    ax.set_xlabel("Month", fontsize=11); ax.set_ylabel("Revenue", fontsize=11)
+    ax.legend(fontsize=10)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "01_monthly_revenue_trend.png")
+
+
+# ── 02  Revenue by Category (horizontal bar) ─────────────────────────────────
+def chart_category_revenue(df):
+    cat = df.groupby("category")["revenue"].sum().sort_values()
+    colors = [CAT_COLORS.get(c, "#888") for c in cat.index]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.barh(cat.index, cat.values, color=colors, edgecolor="white", height=0.65)
+    for bar, val in zip(bars, cat.values):
+        ax.text(bar.get_width() + 50000, bar.get_y() + bar.get_height()/2,
+                f"₹{val/1e6:.2f}M", va="center", fontsize=10, fontweight="bold")
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(fmt_inr))
+    ax.set_title("Total Revenue by Product Category", fontsize=15, fontweight="bold")
+    ax.set_xlabel("Revenue", fontsize=11)
+    ax.spines[["top","right"]].set_visible(False)
+    ax.set_xlim(0, cat.max() * 1.22)
+    fig.tight_layout()
+    save(fig, "02_revenue_by_category.png")
+
+
+# ── 03  Order Status Pie ──────────────────────────────────────────────────────
+def chart_order_status(o):
+    status = o["order_status"].value_counts()
+    colors = ["#43A047","#E53935","#FB8C00","#1E88E5"]
+    explode = [0.04] * len(status)
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    wedges, texts, autotexts = ax.pie(
+        status, labels=status.index, autopct="%1.1f%%",
+        colors=colors[:len(status)], explode=explode,
+        startangle=140, pctdistance=0.82,
+        wedgeprops={"edgecolor":"white","linewidth":2}
+    )
+    for at in autotexts: at.set_fontsize(11); at.set_fontweight("bold")
+    ax.set_title("Order Status Distribution", fontsize=15, fontweight="bold")
+    fig.tight_layout()
+    save(fig, "03_order_status_pie.png")
+
+
+# ── 04  Customer Segment Revenue (grouped bar) ───────────────────────────────
+def chart_segment_revenue(df):
+    seg = df.groupby(["segment","order_status"]).agg(rev=("revenue","sum")).reset_index()
+    pivot = seg.pivot(index="segment", columns="order_status", values="rev").fillna(0)
+    delivered = df.groupby("segment")["revenue"].sum().sort_values(ascending=False)
+    pivot = pivot.loc[delivered.index]
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    pivot[["Delivered","Returned","Cancelled","Pending"]].plot(
+        kind="bar", ax=ax, colormap="Set2", edgecolor="white", rot=0, width=0.7)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_inr))
+    ax.set_title("Revenue by Customer Segment & Order Status", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Customer Segment", fontsize=11)
+    ax.set_ylabel("Revenue", fontsize=11)
+    ax.legend(title="Status", fontsize=10, title_fontsize=10)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "04_segment_revenue.png")
+
+
+# ── 05  Heatmap: Revenue by Month × Category ─────────────────────────────────
+def chart_month_category_heatmap(df):
+    pivot = df.groupby(["month","category"])["revenue"].sum().unstack(fill_value=0)
+    pivot.index = ["Jan","Feb","Mar","Apr","May","Jun",
+                   "Jul","Aug","Sep","Oct","Nov","Dec"][:len(pivot)]
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+    sns.heatmap(pivot/1e6, cmap="YlOrRd", annot=True, fmt=".1f",
+                linewidths=0.4, linecolor="white", ax=ax,
+                cbar_kws={"label":"Revenue (₹M)"})
+    ax.set_title("Revenue Heatmap: Month vs Category (₹M)", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Category", fontsize=11); ax.set_ylabel("Month", fontsize=11)
+    plt.xticks(rotation=30, ha="right")
+    fig.tight_layout()
+    save(fig, "05_month_category_heatmap.png")
+
+
+# ── 06  Top 10 Cities by Revenue ─────────────────────────────────────────────
+def chart_top_cities(df):
+    city = df.groupby("city")["revenue"].sum().nlargest(10).reset_index()
+    city.columns = ["city","revenue"]
+    city = city.sort_values("revenue")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    palette = sns.color_palette("Blues_d", len(city))
+    bars = ax.barh(city["city"], city["revenue"], color=palette, edgecolor="white")
+    for bar, val in zip(bars, city["revenue"]):
+        ax.text(bar.get_width() + 20000, bar.get_y() + bar.get_height()/2,
+                f"₹{val/1e6:.2f}M", va="center", fontsize=10)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(fmt_inr))
+    ax.set_title("Top 10 Cities by Revenue", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Revenue", fontsize=11)
+    ax.spines[["top","right"]].set_visible(False)
+    ax.set_xlim(0, city["revenue"].max() * 1.25)
+    fig.tight_layout()
+    save(fig, "06_top_cities_revenue.png")
+
+
+# ── 07  Payment Method Distribution ──────────────────────────────────────────
+def chart_payment_methods(o):
+    pm = o.groupby("payment_method").agg(orders=("order_id","count"),
+                                          revenue=("revenue","sum")).reset_index()
+    pm = pm.sort_values("revenue", ascending=False)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    colors = sns.color_palette("tab10", len(pm))
+
+    # Orders count
+    axes[0].bar(pm["payment_method"], pm["orders"], color=colors, edgecolor="white")
+    axes[0].set_title("Orders by Payment Method", fontsize=12, fontweight="bold")
+    axes[0].set_ylabel("Number of Orders"); axes[0].tick_params(axis="x", rotation=30)
+    axes[0].spines[["top","right"]].set_visible(False)
+
+    # Revenue
+    axes[1].bar(pm["payment_method"], pm["revenue"]/1e6, color=colors, edgecolor="white")
+    axes[1].set_title("Revenue by Payment Method (₹M)", fontsize=12, fontweight="bold")
+    axes[1].set_ylabel("Revenue (₹M)"); axes[1].tick_params(axis="x", rotation=30)
+    axes[1].spines[["top","right"]].set_visible(False)
+
+    fig.suptitle("Payment Method Analysis", fontsize=15, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    save(fig, "07_payment_methods.png")
+
+
+# ── 08  Discount vs Profit (scatter) ─────────────────────────────────────────
+def chart_discount_profit(df):
+    sample = df.sample(min(2000, len(df)), random_state=42)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    colors  = sample["category"].map(CAT_COLORS).fillna("#888")
+    ax.scatter(sample["discount"]*100, sample["profit"],
+               c=colors, alpha=0.45, s=20, edgecolors="none")
+
+    # Trend line
+    z = np.polyfit(sample["discount"], sample["profit"], 1)
+    xline = np.linspace(0, 0.30, 100)
+    ax.plot(xline*100, np.poly1d(z)(xline), "k--", linewidth=1.8, label="Trend")
+    ax.axhline(0, color="red", linewidth=1, linestyle=":", label="Break-even")
+
+    from matplotlib.lines import Line2D
+    legend_els = [Line2D([0],[0], marker="o", color="w", markerfacecolor=v,
+                          markersize=8, label=k) for k, v in CAT_COLORS.items()]
+    ax.legend(handles=legend_els, fontsize=8, ncol=2, loc="upper right")
+    ax.set_title("Discount % vs Profit per Order", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Discount (%)", fontsize=11); ax.set_ylabel("Profit (₹)", fontsize=11)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "08_discount_vs_profit.png")
+
+
+# ── 09  Age Group × Gender Revenue ───────────────────────────────────────────
+def chart_age_gender(df):
+    ag = (df[df["gender"].isin(["Male","Female"])]
+          .groupby(["age_group","gender"], observed=True)["revenue"]
+          .sum().unstack(fill_value=0) / 1e6)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ag.plot(kind="bar", ax=ax, color=["#1E88E5","#E91E63"],
+            edgecolor="white", rot=0, width=0.6)
+    ax.set_title("Revenue by Age Group & Gender", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Age Group", fontsize=11); ax.set_ylabel("Revenue (₹M)", fontsize=11)
+    ax.legend(title="Gender", fontsize=10)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "09_age_gender_revenue.png")
+
+
+# ── 10  Weekly Order Pattern ──────────────────────────────────────────────────
+def chart_weekly_pattern(o):
+    day_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    wk = o.groupby("weekday")["revenue"].sum().reindex(day_order)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ["#E53935" if d in ["Saturday","Sunday"] else "#1E88E5" for d in day_order]
+    bars = ax.bar(wk.index, wk.values/1e6, color=colors, edgecolor="white", width=0.65)
+    for bar, val in zip(bars, wk.values/1e6):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05,
+                f"₹{val:.1f}M", ha="center", fontsize=9, fontweight="bold")
+    ax.set_title("Revenue by Day of Week", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Revenue (₹M)", fontsize=11)
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(color="#1E88E5",label="Weekday"),
+                        Patch(color="#E53935",label="Weekend")], fontsize=10)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "10_weekly_order_pattern.png")
+
+
+# ── 11  RFM Segment Distribution ─────────────────────────────────────────────
+def chart_rfm_segments(rfm):
+    seg_counts = rfm["rfm_segment"].value_counts()
+    seg_rev    = rfm.groupby("rfm_segment")["monetary"].sum()
+    colors_map = {"Champions":"#43A047","Loyal":"#1E88E5","At Risk":"#FB8C00","Lost":"#E53935"}
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    cols = [colors_map.get(s,"#888") for s in seg_counts.index]
+
+    axes[0].bar(seg_counts.index, seg_counts.values, color=cols, edgecolor="white")
+    axes[0].set_title("Customer Count by RFM Segment", fontsize=12, fontweight="bold")
+    axes[0].set_ylabel("Customers"); axes[0].spines[["top","right"]].set_visible(False)
+
+    axes[1].bar(seg_rev.index, seg_rev.values/1e6,
+                color=[colors_map.get(s,"#888") for s in seg_rev.index], edgecolor="white")
+    axes[1].set_title("Revenue by RFM Segment (₹M)", fontsize=12, fontweight="bold")
+    axes[1].set_ylabel("Revenue (₹M)"); axes[1].spines[["top","right"]].set_visible(False)
+
+    fig.suptitle("RFM Customer Segmentation", fontsize=15, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    save(fig, "11_rfm_segments.png")
+
+
+# ── 12  Delivery Days Distribution ────────────────────────────────────────────
+def chart_delivery_days(o):
+    delivered = o[(o["order_status"]=="Delivered") & o["delivery_days"].notna()]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Histogram
+    axes[0].hist(delivered["delivery_days"], bins=13, color="#5C6BC0",
+                 edgecolor="white", linewidth=0.7)
+    axes[0].axvline(delivered["delivery_days"].mean(), color="red",
+                    linestyle="--", linewidth=1.8, label=f"Mean: {delivered['delivery_days'].mean():.1f}d")
+    axes[0].set_title("Delivery Days Distribution", fontsize=12, fontweight="bold")
+    axes[0].set_xlabel("Days"); axes[0].set_ylabel("Orders")
+    axes[0].legend(); axes[0].spines[["top","right"]].set_visible(False)
+
+    # Box by category
+    cat_del = (o[(o["order_status"]=="Delivered") & o["delivery_days"].notna()]
+               .merge(pd.read_csv(os.path.join(DATA_DIR,"products_clean.csv"))[["product_id","category"]],
+                      on="product_id", how="left"))
+    cat_del.boxplot(column="delivery_days", by="category", ax=axes[1],
+                    patch_artist=True, vert=True,
+                    boxprops=dict(facecolor="#80DEEA"),
+                    medianprops=dict(color="red",linewidth=1.5))
+    axes[1].set_title("Delivery Days by Category", fontsize=12, fontweight="bold")
+    axes[1].set_xlabel(""); axes[1].set_ylabel("Days")
+    plt.sca(axes[1]); plt.xticks(rotation=35, ha="right")
+    fig.suptitle("Delivery Performance Analysis", fontsize=15, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    save(fig, "12_delivery_analysis.png")
+
+
+# ── 13  Product Margin vs Rating ──────────────────────────────────────────────
+def chart_margin_rating(p, df):
+    prod_agg = df.groupby("product_id").agg(
+        revenue=("revenue","sum"), orders=("order_id","count"),
+        avg_rating=("rating","mean")
+    ).reset_index().merge(p[["product_id","category","margin_pct"]], on="product_id")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for cat, grp in prod_agg.groupby("category"):
+        ax.scatter(grp["avg_rating"], grp["margin_pct"],
+                   s=grp["revenue"]/5000, alpha=0.65,
+                   label=cat, color=CAT_COLORS.get(cat,"#888"), edgecolors="white")
+
+    ax.axvline(3, color="grey", linestyle="--", linewidth=1, alpha=0.5)
+    ax.set_title("Product Rating vs Gross Margin %\n(bubble size = revenue)", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Average Customer Rating", fontsize=11)
+    ax.set_ylabel("Gross Margin %", fontsize=11)
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "13_margin_vs_rating.png")
+
+
+# ── 14  YoY Growth ────────────────────────────────────────────────────────────
+def chart_yoy_growth(o):
+    yearly = o.groupby("year")["revenue"].sum().reset_index()
+    yearly["yoy_growth"] = yearly["revenue"].pct_change() * 100
+
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    ax2 = ax1.twinx()
+
+    bars = ax1.bar(yearly["year"].astype(str), yearly["revenue"]/1e6,
+                    color="#1E88E5", alpha=0.75, edgecolor="white", width=0.5)
+    ax2.plot(yearly["year"].astype(str), yearly["yoy_growth"],
+             marker="o", color="#E53935", linewidth=2.5, markersize=9, zorder=5)
+    ax2.axhline(0, color="grey", linewidth=0.8, linestyle="--")
+
+    for bar, val in zip(bars, yearly["revenue"]/1e6):
+        ax1.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.3,
+                 f"₹{val:.1f}M", ha="center", fontsize=10, fontweight="bold", color="#1E88E5")
+    for _, row in yearly.dropna().iterrows():
+        ax2.annotate(f"{row['yoy_growth']:+.1f}%",
+                     (str(int(row["year"])), row["yoy_growth"]),
+                     xytext=(0, 10), textcoords="offset points",
+                     ha="center", fontsize=10, color="#E53935", fontweight="bold")
+
+    ax1.set_title("Year-over-Year Revenue & Growth", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Revenue (₹M)", fontsize=11, color="#1E88E5")
+    ax2.set_ylabel("YoY Growth %", fontsize=11, color="#E53935")
+    ax1.spines[["top"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "14_yoy_growth.png")
+
+
+def main():
+    print("Generating visualizations …")
+    c, p, o, df, rfm = load()
+
+    chart_monthly_revenue(o)
+    chart_category_revenue(df)
+    chart_order_status(o)
+    chart_segment_revenue(df)
+    chart_month_category_heatmap(df)
+    chart_top_cities(df)
+    chart_payment_methods(o)
+    chart_discount_profit(df)
+    chart_age_gender(df)
+    chart_weekly_pattern(o)
+    chart_rfm_segments(rfm)
+    chart_delivery_days(o)
+    chart_margin_rating(p, df)
+    chart_yoy_growth(o)
+
+    print(f"\n✅ 14 charts saved → {FIG_DIR}")
+
+if __name__ == "__main__":
+    main()
