@@ -1,1 +1,312 @@
+"""
+==============================================================
+ E-COMMERCE SALES & CUSTOMER ANALYTICS
+ File : src/04_ml_model.py
+ Desc : Two ML tasks:
+        A) Customer Churn Prediction  (Classification)
+        B) Revenue Forecasting        (Regression)
+==============================================================
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os, warnings
+warnings.filterwarnings("ignore")
+
+from sklearn.model_selection  import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.preprocessing    import LabelEncoder, StandardScaler
+from sklearn.ensemble         import RandomForestClassifier, GradientBoostingRegressor
+from sklearn.linear_model     import LogisticRegression, LinearRegression
+from sklearn.metrics          import (
+    classification_report, confusion_matrix, roc_auc_score, roc_curve,
+    mean_absolute_error, r2_score, mean_squared_error
+)
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+FIG_DIR  = os.path.join(os.path.dirname(__file__), "..", "visualizations")
+os.makedirs(FIG_DIR, exist_ok=True)
+
+def load():
+    c   = pd.read_csv(os.path.join(DATA_DIR, "customers_clean.csv"), parse_dates=["join_date"])
+    o   = pd.read_csv(os.path.join(DATA_DIR, "orders_clean.csv"),    parse_dates=["order_date"])
+    rfm = pd.read_csv(os.path.join(DATA_DIR, "rfm.csv"))
+    p   = pd.read_csv(os.path.join(DATA_DIR, "products_clean.csv"))
+    return c, o, rfm, p
+
+def save_fig(fig, name):
+    path = os.path.join(FIG_DIR, name)
+    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Saved -> {name}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A. CUSTOMER CHURN PREDICTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_churn_features(c, o, rfm):
+    """
+    Churn definition: customer has NOT placed any order in the last 180 days
+    (relative to 2025-01-01 snapshot).
+    """
+    snapshot = pd.Timestamp("2025-01-01")
+
+    # Last order date per customer
+    last_order = (o[o["order_status"] == "Delivered"]
+                  .groupby("customer_id")["order_date"].max()
+                  .reset_index()
+                  .rename(columns={"order_date":"last_order_date"}))
+
+    # Aggregate customer-level features from orders
+    cust_stats = o.groupby("customer_id").agg(
+        total_orders    =("order_id","count"),
+        total_revenue   =("revenue","sum"),
+        avg_order_value =("revenue","mean"),
+        total_discount  =("discount","mean"),
+        cancelled_orders=("order_status", lambda x: (x=="Cancelled").sum()),
+        returned_orders =("order_status", lambda x: (x=="Returned").sum()),
+        avg_rating      =("rating","mean"),
+        unique_categories=("product_id","nunique"),
+    ).reset_index()
+
+    df = (c[["customer_id","age","gender","segment","is_subscribed","tenure_days"]]
+          .merge(cust_stats, on="customer_id", how="left")
+          .merge(last_order,  on="customer_id", how="left")
+          .merge(rfm[["customer_id","recency","frequency","monetary","rfm_score"]], on="customer_id", how="left"))
+
+    df["days_since_last_order"] = (snapshot - df["last_order_date"]).dt.days
+    df["days_since_last_order"] = df["days_since_last_order"].fillna(999)
+
+    # Target: churned = no order in last 180 days
+    df["churned"] = (df["days_since_last_order"] > 180).astype(int)
+
+    # Fill remaining NaNs
+    num_cols = df.select_dtypes(include=np.number).columns
+    df[num_cols] = df[num_cols].fillna(df[num_cols].median())
+
+    # Encode categoricals
+    le = LabelEncoder()
+    df["gender_enc"]  = le.fit_transform(df["gender"].fillna("Unknown"))
+    df["segment_enc"] = le.fit_transform(df["segment"].fillna("Unknown"))
+
+    feature_cols = [
+        "age","tenure_days","total_orders","total_revenue","avg_order_value",
+        "total_discount","cancelled_orders","returned_orders","avg_rating",
+        "unique_categories","recency","frequency","monetary","rfm_score",
+        "is_subscribed","gender_enc","segment_enc"
+    ]
+    return df, feature_cols
+
+
+def train_churn_model(c, o, rfm):
+    print("\n" + "="*55)
+    print("  A. CUSTOMER CHURN PREDICTION")
+    print("="*55)
+
+    df, feat = build_churn_features(c, o, rfm)
+    X = df[feat]; y = df["churned"]
+
+    print(f"  Churn rate: {y.mean()*100:.1f}%  |  Total customers: {len(df)}")
+
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    sc = StandardScaler()
+    X_tr_sc = sc.fit_transform(X_tr); X_te_sc = sc.transform(X_te)
+
+    # ── Logistic Regression
+    lr = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+    lr.fit(X_tr_sc, y_tr)
+    lr_pred = lr.predict(X_te_sc); lr_prob = lr.predict_proba(X_te_sc)[:,1]
+    lr_auc  = roc_auc_score(y_te, lr_prob)
+
+    # ── Random Forest
+    rf = RandomForestClassifier(n_estimators=200, max_depth=10, class_weight="balanced",
+                                 random_state=42, n_jobs=-1)
+    rf.fit(X_tr, y_tr)
+    rf_pred = rf.predict(X_te); rf_prob = rf.predict_proba(X_te)[:,1]
+    rf_auc  = roc_auc_score(y_te, rf_prob)
+
+    print(f"\n  Logistic Regression — Accuracy: {(lr_pred==y_te).mean():.4f}  AUC: {lr_auc:.4f}")
+    print(f"  Random Forest       — Accuracy: {(rf_pred==y_te).mean():.4f}  AUC: {rf_auc:.4f}")
+    print(f"\n  Classification Report (Random Forest):")
+    print(classification_report(y_te, rf_pred, target_names=["Retained","Churned"]))
+
+    # Cross-validation
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    rf_cv = cross_val_score(rf, X_tr, y_tr, cv=cv, scoring="roc_auc")
+    print(f"  5-Fold CV AUC: {rf_cv.mean():.4f} ± {rf_cv.std():.4f}")
+
+    # Plots
+    _plot_churn_confusion(y_te, rf_pred)
+    _plot_churn_roc(y_te, lr_prob, rf_prob, lr_auc, rf_auc)
+    _plot_churn_feature_importance(rf, feat)
+
+    return rf, feat, df
+
+
+def _plot_churn_confusion(y_te, rf_pred):
+    fig, ax = plt.subplots(figsize=(6, 5))
+    cm = confusion_matrix(y_te, rf_pred)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+                xticklabels=["Retained","Churned"],
+                yticklabels=["Retained","Churned"],
+                linewidths=0.5)
+    ax.set_title("Churn Prediction — Confusion Matrix (RF)", fontsize=13, fontweight="bold")
+    ax.set_ylabel("Actual"); ax.set_xlabel("Predicted")
+    fig.tight_layout()
+    save_fig(fig, "15_churn_confusion_matrix.png")
+
+
+def _plot_churn_roc(y_te, lr_prob, rf_prob, lr_auc, rf_auc):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for prob, label, color, auc in [
+        (lr_prob, "Logistic Regression", "#1E88E5", lr_auc),
+        (rf_prob, "Random Forest",       "#43A047", rf_auc),
+    ]:
+        fpr, tpr, _ = roc_curve(y_te, prob)
+        ax.plot(fpr, tpr, label=f"{label}  (AUC={auc:.3f})", linewidth=2.2, color=color)
+    ax.fill_between(fpr, tpr, alpha=0.07, color="#43A047")
+    ax.plot([0,1],[0,1],"k--",linewidth=1,label="Random (AUC=0.500)")
+    ax.set_title("ROC Curve — Customer Churn", fontsize=14, fontweight="bold")
+    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
+    ax.legend(fontsize=11)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save_fig(fig, "16_churn_roc_curve.png")
+
+
+def _plot_churn_feature_importance(rf, feat):
+    imp = pd.Series(rf.feature_importances_, index=feat).sort_values()
+    fig, ax = plt.subplots(figsize=(9, 6))
+    palette = sns.color_palette("viridis", len(imp))
+    ax.barh(imp.index, imp.values, color=palette, edgecolor="white")
+    for i, (v, l) in enumerate(zip(imp.values, imp.index)):
+        ax.text(v + 0.002, i, f"{v:.3f}", va="center", fontsize=9)
+    ax.set_title("Feature Importance — Churn Prediction (RF)", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Importance Score")
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save_fig(fig, "17_churn_feature_importance.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# B. REVENUE FORECASTING (Monthly Time-Series Regression)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def train_revenue_forecast(o):
+    print("\n" + "="*55)
+    print("  B. MONTHLY REVENUE FORECASTING")
+    print("="*55)
+
+    monthly = (o.groupby(o["order_date"].dt.to_period("M"))["revenue"]
+               .sum().reset_index())
+    monthly.columns = ["period","revenue"]
+    monthly["period"] = monthly["period"].dt.to_timestamp()
+    monthly = monthly.sort_values("period").reset_index(drop=True)
+
+    # Feature engineering for time-series regression
+    monthly["t"]         = np.arange(len(monthly))
+    monthly["month"]     = monthly["period"].dt.month
+    monthly["quarter"]   = monthly["period"].dt.quarter
+    monthly["is_q4"]     = (monthly["quarter"] == 4).astype(int)
+    monthly["lag1"]      = monthly["revenue"].shift(1)
+    monthly["lag2"]      = monthly["revenue"].shift(2)
+    monthly["lag3"]      = monthly["revenue"].shift(3)
+    monthly["roll3_mean"]= monthly["revenue"].shift(1).rolling(3).mean()
+    monthly = monthly.dropna().reset_index(drop=True)
+
+    feat = ["t","month","quarter","is_q4","lag1","lag2","lag3","roll3_mean"]
+    X = monthly[feat]; y = monthly["revenue"]
+
+    split = int(len(monthly) * 0.80)
+    X_tr, X_te = X.iloc[:split], X.iloc[split:]
+    y_tr, y_te = y.iloc[:split], y.iloc[split:]
+
+    # Linear Regression
+    lr = LinearRegression()
+    lr.fit(X_tr, y_tr)
+    lr_pred = lr.predict(X_te)
+    lr_mae  = mean_absolute_error(y_te, lr_pred)
+    lr_r2   = r2_score(y_te, lr_pred)
+
+    # Gradient Boosting
+    gb = GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=0.05,
+                                    random_state=42)
+    gb.fit(X_tr, y_tr)
+    gb_pred = gb.predict(X_te)
+    gb_mae  = mean_absolute_error(y_te, gb_pred)
+    gb_r2   = r2_score(y_te, gb_pred)
+
+    print(f"\n  Linear Regression   — MAE: ₹{lr_mae:,.0f}  |  R²: {lr_r2:.4f}")
+    print(f"  Gradient Boosting   — MAE: ₹{gb_mae:,.0f}  |  R²: {gb_r2:.4f}")
+
+    _plot_forecast(monthly, split, y_te, lr_pred, gb_pred)
+    _plot_residuals(y_te, gb_pred)
+
+    return gb, monthly
+
+
+def _plot_forecast(monthly, split, y_te, lr_pred, gb_pred):
+    fig, ax = plt.subplots(figsize=(13, 6))
+    test_dates = monthly["period"].iloc[split:]
+
+    ax.plot(monthly["period"], monthly["revenue"]/1e6,
+            color="#546E7A", linewidth=2, label="Actual Revenue", zorder=3)
+    ax.axvline(monthly["period"].iloc[split], color="grey",
+               linestyle="--", linewidth=1.2, alpha=0.7, label="Train/Test Split")
+    ax.plot(test_dates, lr_pred/1e6,
+            color="#FB8C00", linewidth=2, linestyle="--", label="Linear Regression")
+    ax.plot(test_dates, gb_pred/1e6,
+            color="#E53935", linewidth=2.2, label="Gradient Boosting")
+
+    ax.fill_between(monthly["period"], monthly["revenue"]/1e6, alpha=0.10, color="#546E7A")
+    ax.set_title("Monthly Revenue Forecast vs Actual", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Month"); ax.set_ylabel("Revenue (₹M)")
+    ax.legend(fontsize=10)
+    ax.spines[["top","right"]].set_visible(False)
+    fig.tight_layout()
+    save_fig(fig, "18_revenue_forecast.png")
+
+
+def _plot_residuals(y_te, gb_pred):
+    residuals = np.array(y_te) - gb_pred
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    axes[0].scatter(gb_pred/1e6, residuals/1e6, color="#7B1FA2", alpha=0.7, edgecolors="white")
+    axes[0].axhline(0, color="red", linestyle="--", linewidth=1.5)
+    axes[0].set_title("Residuals vs Predicted", fontsize=12, fontweight="bold")
+    axes[0].set_xlabel("Predicted Revenue (₹M)"); axes[0].set_ylabel("Residual (₹M)")
+    axes[0].spines[["top","right"]].set_visible(False)
+
+    axes[1].hist(residuals/1e6, bins=12, color="#7B1FA2", edgecolor="white")
+    axes[1].set_title("Residual Distribution", fontsize=12, fontweight="bold")
+    axes[1].set_xlabel("Residual (₹M)"); axes[1].set_ylabel("Frequency")
+    axes[1].spines[["top","right"]].set_visible(False)
+
+    fig.suptitle("Gradient Boosting — Residual Analysis", fontsize=14, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    save_fig(fig, "19_residual_analysis.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    c, o, rfm, p = load()
+
+    # A. Churn
+    rf_churn, feat, churn_df = train_churn_model(c, o, rfm)
+
+    # B. Revenue Forecast
+    gb_forecast, monthly = train_revenue_forecast(o)
+
+    print("\n✅ ML modelling complete — 5 plots saved.")
+
+
+if __name__ == "__main__":
+    main()
 
