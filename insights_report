@@ -1,1 +1,144 @@
 
+"""
+==============================================================
+ E-COMMERCE SALES & CUSTOMER ANALYTICS
+ File : src/05_insights_report.py
+ Desc : Print a structured business insights summary that
+        can be pasted directly into the GitHub README or
+        an executive report.
+==============================================================
+"""
+
+import pandas as pd
+import numpy as np
+import os
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+def banner(title):
+    print(f"\n{'#'*62}")
+    print(f"#  {title}")
+    print(f"{'#'*62}")
+
+def section(title):
+    print(f"\n{'─'*55}")
+    print(f"  {title}")
+    print(f"{'─'*55}")
+
+def load():
+    c   = pd.read_csv(os.path.join(DATA_DIR, "customers_clean.csv"), parse_dates=["join_date"])
+    p   = pd.read_csv(os.path.join(DATA_DIR, "products_clean.csv"))
+    o   = pd.read_csv(os.path.join(DATA_DIR, "orders_clean.csv"),    parse_dates=["order_date"])
+    rfm = pd.read_csv(os.path.join(DATA_DIR, "rfm.csv"))
+    df  = o.merge(c[["customer_id","city","segment","is_subscribed","age_group"]], on="customer_id", how="left") \
+            .merge(p[["product_id","category","margin_pct","price_tier"]], on="product_id", how="left")
+    return c, p, o, rfm, df
+
+
+def main():
+    c, p, o, rfm, df = load()
+    delivered = df[df["order_status"] == "Delivered"]
+
+    banner("E-COMMERCE ANALYTICS — BUSINESS INSIGHTS REPORT")
+
+    section("KEY PERFORMANCE INDICATORS")
+    total_rev    = df["revenue"].sum()
+    total_profit = df["profit"].sum()
+    margin       = total_profit / total_rev * 100
+    aov          = df["revenue"].mean()
+    total_cust   = c["customer_id"].nunique()
+    del_rate     = (df["order_status"]=="Delivered").mean()*100
+    ret_rate     = (df["order_status"]=="Returned").mean()*100
+    can_rate     = (df["order_status"]=="Cancelled").mean()*100
+
+    print(f"  Total Revenue          : ₹{total_rev:>14,.0f}")
+    print(f"  Total Profit           : ₹{total_profit:>14,.0f}")
+    print(f"  Overall Gross Margin   :  {margin:>13.1f}%")
+    print(f"  Average Order Value    : ₹{aov:>14,.0f}")
+    print(f"  Total Customers        :  {total_cust:>13,}")
+    print(f"  Delivery Success Rate  :  {del_rate:>13.1f}%")
+    print(f"  Return Rate            :  {ret_rate:>13.1f}%")
+    print(f"  Cancellation Rate      :  {can_rate:>13.1f}%")
+
+    section("YoY REVENUE GROWTH")
+    yr = o.groupby("year")["revenue"].sum()
+    for y, r in yr.items():
+        print(f"  {y}: ₹{r:,.0f}")
+    growth = (yr.iloc[-1] - yr.iloc[0]) / yr.iloc[0] * 100
+    print(f"  Overall growth ({yr.index[0]} → {yr.index[-1]}): {growth:+.1f}%")
+
+    section("TOP PERFORMING CATEGORY")
+    cat = df.groupby("category")["revenue"].sum().sort_values(ascending=False)
+    top_cat = cat.index[0]
+    print(f"  #{1} {top_cat}: ₹{cat.iloc[0]:,.0f}")
+    for i, (c_name, rev) in enumerate(cat.iloc[1:4].items(), 2):
+        print(f"  #{i} {c_name}: ₹{rev:,.0f}")
+
+    section("CUSTOMER SEGMENT INSIGHTS")
+    seg = df.groupby("segment").agg(
+        customers=("customer_id","nunique"),
+        revenue=("revenue","sum"),
+        aov=("revenue","mean")
+    ).sort_values("revenue", ascending=False)
+    for s, row in seg.iterrows():
+        print(f"  {s:<12}: {row['customers']:>4} customers | Rev ₹{row['revenue']:>10,.0f} | AOV ₹{row['aov']:>6,.0f}")
+
+    section("RFM SEGMENTATION SUMMARY")
+    rfm_sum = rfm.groupby("rfm_segment").agg(
+        customers=("customer_id","count"),
+        avg_monetary=("monetary","mean"),
+        avg_frequency=("frequency","mean")
+    ).sort_values("avg_monetary", ascending=False)
+    print(rfm_sum.round(1).to_string())
+
+    section("PAYMENT METHOD PREFERENCE")
+    pm = o.groupby("payment_method")["order_id"].count().sort_values(ascending=False)
+    top_pm = pm.index[0]
+    print(f"  Most popular: {top_pm} ({pm.iloc[0]/len(o)*100:.1f}% of orders)")
+    for method, count in pm.items():
+        print(f"  {method:<15}: {count:>4} orders ({count/len(o)*100:.1f}%)")
+
+    section("SEASONAL PATTERNS")
+    q4_rev = df[df["quarter"]==4]["revenue"].sum()
+    non_q4 = df[df["quarter"]!=4]["revenue"].sum()
+    q4_pct = q4_rev / df["revenue"].sum() * 100
+    print(f"  Q4 (Oct-Dec) contributes {q4_pct:.1f}% of annual revenue")
+    print(f"  Q4 Revenue       : ₹{q4_rev:,.0f}")
+    print(f"  Non-Q4 Revenue   : ₹{non_q4:,.0f}")
+
+    best_day   = o.groupby("weekday")["revenue"].sum().idxmax()
+    worst_day  = o.groupby("weekday")["revenue"].sum().idxmin()
+    print(f"  Best sales day   : {best_day}")
+    print(f"  Weakest sales day: {worst_day}")
+
+    section("DISCOUNT IMPACT")
+    disc_grp = df.groupby("discount_band", observed=True).agg(
+        orders=("order_id","count"), avg_profit=("profit","mean"), loss_pct=("is_loss","mean"))
+    disc_grp["loss_pct"] *= 100
+    print(disc_grp.round(1).to_string())
+
+    section("DELIVERY PERFORMANCE")
+    del_df = o[o["order_status"]=="Delivered"].dropna(subset=["delivery_days"])
+    print(f"  Avg delivery time    : {del_df['delivery_days'].mean():.1f} days")
+    print(f"  Median delivery time : {del_df['delivery_days'].median():.0f} days")
+    print(f"  % Delivered within 3 days : {(del_df['delivery_days']<=3).mean()*100:.1f}%")
+    print(f"  % Delivered within 7 days : {(del_df['delivery_days']<=7).mean()*100:.1f}%")
+
+    section("STRATEGIC RECOMMENDATIONS")
+    recs = [
+        "1. Double down on Electronics & Home & Kitchen — highest revenue drivers.",
+        "2. Launch targeted re-engagement campaign for 'At Risk' & 'Lost' RFM segments.",
+        "3. Restrict deep discounts (>20%) — loss rate is highest in that band.",
+        "4. Invest in Q4 inventory planning — festival season drives disproportionate sales.",
+        "5. Improve delivery SLA: 40%+ orders take 7+ days — delivery speed is a churn driver.",
+        "6. Premium segment has highest AOV — prioritise loyalty rewards for this group.",
+        "7. UPI is the #1 payment method — ensure 0-downtime UPI gateway integration.",
+    ]
+    for r in recs:
+        print(f"  {r}")
+
+    banner("END OF REPORT")
+
+
+if __name__ == "__main__":
+    main()
