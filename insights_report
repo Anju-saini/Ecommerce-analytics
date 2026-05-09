@@ -1,14 +1,3 @@
-
-"""
-==============================================================
- E-COMMERCE SALES & CUSTOMER ANALYTICS
- File : src/05_insights_report.py
- Desc : Print a structured business insights summary that
-        can be pasted directly into the GitHub README or
-        an executive report.
-==============================================================
-"""
-
 import pandas as pd
 import numpy as np
 import os
