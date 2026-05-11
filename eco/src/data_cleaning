@@ -1,1 +1,136 @@
+"""
+==============================================================
+ E-COMMERCE SALES & CUSTOMER ANALYTICS
+ File : src/01_data_cleaning.py
+ Desc : Load raw CSVs → inspect → clean → save clean versions
+==============================================================
+"""
+
+import pandas as pd
+import numpy as np
+import os
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+def load():
+    c = pd.read_csv(os.path.join(DATA_DIR, "customers.csv"))
+    p = pd.read_csv(os.path.join(DATA_DIR, "products.csv"))
+    o = pd.read_csv(os.path.join(DATA_DIR, "orders.csv"))
+    print(f"customers : {c.shape}  |  products : {p.shape}  |  orders : {o.shape}")
+    return c, p, o
+
+
+def inspect(df, name):
+    print(f"\n{'='*55}\n {name}\n{'='*55}")
+    print(df.head(3).to_string())
+    print(f"\nShape   : {df.shape}")
+    miss = df.isnull().sum()
+    miss = miss[miss > 0]
+    if len(miss):
+        print(f"\nMissing :\n{miss.to_string()}")
+    else:
+        print("\nMissing : None")
+    print(f"Dupes   : {df.duplicated().sum()}")
+
+
+def clean_customers(df: pd.DataFrame) -> pd.DataFrame:
+    print("\n[customers] Cleaning …")
+    df = df.drop_duplicates()
+
+    # Age: fill with median, cap outliers
+    median_age = df["age"].median()
+    df["age"] = df["age"].fillna(median_age)
+    df["age"] = df["age"].clip(18, 75).astype(int)
+    print(f"  Age NaNs filled with median ({median_age:.0f}), clipped to [18, 75]")
+
+    # Gender: fill with mode
+    mode_gender = df["gender"].mode()[0]
+    n = df["gender"].isna().sum()
+    df["gender"] = df["gender"].fillna(mode_gender)
+    print(f"  Gender NaNs ({n}) filled with mode '{mode_gender}'")
+
+    # Parse join_date
+    df["join_date"] = pd.to_datetime(df["join_date"])
+
+    # Derived features
+    df["tenure_days"] = (pd.Timestamp("2024-12-31") - df["join_date"]).dt.days
+    df["age_group"]   = pd.cut(df["age"],
+                                bins=[17,25,35,50,75],
+                                labels=["18-25","26-35","36-50","51+"])
+
+    print("  Added: tenure_days, age_group")
+    print("  ✅ Customers done.")
+    return df
+
+
+def clean_products(df: pd.DataFrame) -> pd.DataFrame:
+    print("\n[products] Cleaning …")
+    df = df.drop_duplicates()
+
+    # Gross margin %
+    df["margin_pct"] = ((df["price"] - df["cost_price"]) / df["price"] * 100).round(2)
+
+    # Price tier
+    df["price_tier"] = pd.cut(df["price"],
+                               bins=[0, 300, 800, 2000, 99999],
+                               labels=["Budget","Mid-range","Premium","Luxury"])
+
+    print("  Added: margin_pct, price_tier")
+    print("  ✅ Products done.")
+    return df
+
+
+def clean_orders(df: pd.DataFrame) -> pd.DataFrame:
+    print("\n[orders] Cleaning …")
+    df = df.drop_duplicates()
+
+    # Parse date
+    df["order_date"] = pd.to_datetime(df["order_date"])
+
+    # Fill delivery_days only for delivered orders
+    median_del = df.loc[df["order_status"] == "Delivered", "delivery_days"].median()
+    df.loc[(df["order_status"] == "Delivered") & df["delivery_days"].isna(),
+           "delivery_days"] = median_del
+    print(f"  delivery_days NaNs filled with median ({median_del:.0f} days)")
+
+    # Rating: fill with product-level mean (delivered only)
+    df.loc[(df["order_status"] == "Delivered") & df["rating"].isna(), "rating"] = \
+        df.loc[df["order_status"] == "Delivered", "rating"].median()
+
+    # Time features
+    df["year"]    = df["order_date"].dt.year
+    df["month"]   = df["order_date"].dt.month
+    df["quarter"] = df["order_date"].dt.quarter
+    df["weekday"] = df["order_date"].dt.day_name()
+    df["month_name"] = df["order_date"].dt.strftime("%b")
+
+    # Discount band
+    df["discount_band"] = pd.cut(df["discount"],
+                                  bins=[-0.01, 0.0, 0.10, 0.20, 1.0],
+                                  labels=["No Discount","Low (1-10%)","Mid (11-20%)","High (>20%)"])
+
+    # Flag negative profit (loss orders)
+    df["is_loss"] = (df["profit"] < 0).astype(int)
+
+    print("  Added: year, month, quarter, weekday, month_name, discount_band, is_loss")
+    print("  ✅ Orders done.")
+    return df
+
+
+def main():
+    c, p, o = load()
+    inspect(c, "CUSTOMERS"); inspect(p, "PRODUCTS"); inspect(o, "ORDERS")
+
+    c = clean_customers(c)
+    p = clean_products(p)
+    o = clean_orders(o)
+
+    c.to_csv(os.path.join(DATA_DIR, "customers_clean.csv"), index=False)
+    p.to_csv(os.path.join(DATA_DIR, "products_clean.csv"),  index=False)
+    o.to_csv(os.path.join(DATA_DIR, "orders_clean.csv"),    index=False)
+    print("\n✅ All cleaned CSVs saved.")
+
+
+if __name__ == "__main__":
+    main()
 
