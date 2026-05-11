@@ -1,11 +1,3 @@
-"""
-==============================================================
- E-COMMERCE SALES & CUSTOMER ANALYTICS
- File : src/01_data_cleaning.py
- Desc : Load raw CSVs → inspect → clean → save clean versions
-==============================================================
-"""
-
 import pandas as pd
 import numpy as np
 import os
