@@ -1,13 +1,4 @@
 
-"""
-==============================================================
- E-COMMERCE SALES & CUSTOMER ANALYTICS
- File : src/02_eda.py
- Desc : Deep exploratory analysis across sales, customers,
-        products and time dimensions.
-==============================================================
-"""
-
 import pandas as pd
 import numpy as np
 import os
